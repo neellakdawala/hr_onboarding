@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments
+myenv/
+venv/
+env/
+.venv/
+
+# Databases + generated data
+*.db
+*.sqlite
+*.sqlite3
+data/chroma/
+
+# Environment variables (for future API keys)
+.env
+.env.local
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
