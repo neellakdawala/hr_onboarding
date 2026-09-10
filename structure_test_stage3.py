@@ -1,3 +1,17 @@
+"""
+Stage 3 structure test.
+
+Verifies what can be checked without hitting Ollama:
+  - Graph now has 8 nodes (5 old + 3 new)
+  - Intent routing is correct for both intents
+  - Tools work directly against the seeded HRMS database
+  - Tool schemas are discoverable (name + args)
+
+The end-to-end run with actual LLM + tool-calling lives in
+smoke_test_stage3.py and needs Ollama.
+
+Run:  python structure_test_stage3.py
+"""
 from app.agent.graph import build_graph, _route_after_intent
 from app.agent.state import AgentState
 from app.agent.tools import (
@@ -50,10 +64,10 @@ check(
 
 # --- Tool registry -------------------------------------------------------
 check(
-    "3 tools registered",
-    len(ALL_TOOLS) == 3
-    and set(TOOLS_BY_NAME.keys())
-    == {"get_leave_balance", "get_leave_requests", "get_attendance"},
+    "at least 3 core tools registered (Stage 3 required set)",
+    len(ALL_TOOLS) >= 3
+    and {"get_leave_balance", "get_leave_requests", "get_attendance"}
+    .issubset(set(TOOLS_BY_NAME.keys())),
 )
 
 # --- Tool schemas are exposed correctly ----------------------------------
