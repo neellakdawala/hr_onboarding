@@ -362,20 +362,18 @@ def classify_intent_node(state: AgentState) -> dict:
  
 def tool_call_node(state: AgentState) -> dict:
     """
-    The tool-calling node.
+    Ask the LLM which tool(s) to call to answer the user's question.
  
-    Binds the HRMS tools to the LLM and asks it to answer the user's
-    question. The LLM decides which tool(s) to call and with what
-    arguments. We then execute those calls ourselves and stash the
-    raw results in state for the next node to summarise.
+    In Stage 4 this node ONLY plans the calls. Execution happens later
+    in `tool_execute_node`, after `human_approval_node` has (if needed)
+    gated on human approval. Splitting plan from execution is what
+    lets HITL sit between them cleanly.
  
-    A note on robustness: if the model produces no tool call at all
-    (which happens with tiny models), we fall back to `get_leave_balance`
-    on the current user, which is the most common personal-data question.
-    That is honest defensive engineering, not a hack - and it is worth
-    naming in an interview.
+    Robustness: if the small model fails to emit any tool call, fall
+    back to `get_leave_balance` on the current user - the most common
+    personal-data question.
     """
-    from app.agent.tools import ALL_TOOLS, TOOLS_BY_NAME, get_leave_balance
+    from app.agent.tools import ALL_TOOLS, WRITE_TOOL_NAMES
  
     llm = get_llm().bind_tools(ALL_TOOLS)
     question = state["question"]
@@ -383,44 +381,140 @@ def tool_call_node(state: AgentState) -> dict:
  
     system = dedent(f"""\
         You are an HR assistant with access to tools that read live
-        employee data. The current user's employee_code is "{user_code}".
-        Always pass that employee_code as the argument.
+        employee data and (with approval) write a leave request. The
+        current user's employee_code is "{user_code}". Always pass that
+        employee_code as the argument.
  
         Choose the appropriate tool and call it. Do not answer from
         memory - the tools are the only source of truth for personal data.
+        Use submit_leave_request only when the user clearly wants to
+        FILE a new leave request (not when they ask ABOUT existing ones).
     """)
  
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
-    calls = getattr(response, "tool_calls", None) or []
+    raw_calls = getattr(response, "tool_calls", None) or []
  
     # Fallback if the small model failed to emit a tool call.
-    if not calls:
-        calls = [{
+    if not raw_calls:
+        raw_calls = [{
             "name": "get_leave_balance",
             "args": {"employee_code": user_code},
         }]
  
+    # Normalise the shape and split reads/writes.
+    tool_calls: list[dict] = []
+    pending_writes: list[dict] = []
+    for c in raw_calls:
+        entry = {"name": c.get("name"), "args": c.get("args", {}) or {}}
+        tool_calls.append(entry)
+        if entry["name"] in WRITE_TOOL_NAMES:
+            pending_writes.append(entry)
+ 
+    return {
+        "tool_calls": tool_calls,
+        "pending_writes": pending_writes,
+        "path": _append_path(state, "tool_call"),
+    }
+ 
+ 
+def human_approval_node(state: AgentState) -> dict:
+    """
+    Human-in-the-loop gate.
+ 
+    If there are no writes pending, this is a no-op passthrough.
+    If there are writes, we call `interrupt()`, which pauses the
+    graph until the caller resumes with a decision:
+ 
+        Command(resume={"approval": "approved" | "rejected",
+                        "note": "<optional>"})
+ 
+    That decision arrives back to us here on resume, and we record it
+    in state for `tool_execute_node` to act on.
+    """
+    from langgraph.types import interrupt
+ 
+    pending = state.get("pending_writes", [])
+    if not pending:
+        return {
+            "approval": "approved",   # trivially approved: nothing to write
+            "path": _append_path(state, "human_approval"),
+        }
+ 
+    # Ask the caller for approval. This pauses the graph.
+    decision = interrupt({
+        "kind": "approval_request",
+        "message": (
+            "The agent wants to perform the following WRITE actions. "
+            "Approve or reject."
+        ),
+        "pending_writes": pending,
+    })
+ 
+    # `decision` is whatever the caller passed via Command(resume=...).
+    # Be defensive about shape - a bare string is common.
+    if isinstance(decision, dict):
+        approval = str(decision.get("approval", "rejected")).lower()
+        note = str(decision.get("note", ""))
+    else:
+        approval = str(decision).lower()
+        note = ""
+ 
+    if approval not in {"approved", "rejected"}:
+        approval = "rejected"          # any garbage means "do not write"
+ 
+    return {
+        "approval": approval,
+        "approval_note": note,
+        "path": _append_path(state, "human_approval"),
+    }
+ 
+ 
+def tool_execute_node(state: AgentState) -> dict:
+    """
+    Execute the tool calls the LLM planned, respecting the approval
+    decision for any writes.
+ 
+    - Read tools always run.
+    - Write tools run only if `approval == "approved"`. If rejected,
+      we record a skipped-result so `tool_answer_node` can tell the
+      user honestly what happened.
+    """
+    from app.agent.tools import TOOLS_BY_NAME, WRITE_TOOL_NAMES
+ 
+    tool_calls = state.get("tool_calls", [])
+    approval = state.get("approval", "approved")
+ 
     results: list[dict] = []
-    for call in calls:
+    for call in tool_calls:
         name = call.get("name")
         args = call.get("args", {}) or {}
+        is_write = name in WRITE_TOOL_NAMES
+ 
+        if is_write and approval != "approved":
+            results.append({
+                "tool": name,
+                "args": args,
+                "result": {
+                    "skipped": True,
+                    "reason": "human rejected write action",
+                    "note": state.get("approval_note", ""),
+                },
+            })
+            continue
+ 
         tool = TOOLS_BY_NAME.get(name)
         if tool is None:
             results.append({"tool": name, "error": "unknown tool"})
             continue
         try:
             output = tool.invoke(args)
-        except Exception as exc:                                 # noqa: BLE001
+        except Exception as exc:                               # noqa: BLE001
             output = {"error": f"tool raised: {exc}"}
         results.append({"tool": name, "args": args, "result": output})
  
     return {
-        "tool_calls": [
-            {"name": c.get("name"), "args": c.get("args", {})}
-            for c in calls
-        ],
         "tool_results": results,
-        "path": _append_path(state, "tool_call"),
+        "path": _append_path(state, "tool_execute"),
     }
  
  

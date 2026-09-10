@@ -1,16 +1,15 @@
-# Stage 1 - HRMS
 fastapi
 uvicorn[standard]
 sqlalchemy
 pydantic
 httpx  # required by FastAPI TestClient
- 
-# Stage 2 - LangGraph agent
-langgraph
+ langgraph
 langchain
 langchain-community
 langchain-ollama
 langchain-chroma
 chromadb
 langchain-text-splitters
+langfuse
+python-dotenv
  
