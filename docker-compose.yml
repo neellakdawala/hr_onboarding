@@ -1,0 +1,33 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hrms-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      # Persist pulled models across container restarts.
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  hrms:
+    build: .
+    container_name: hrms-agent
+    ports:
+      - "8000:8000"
+    environment:
+      # ChatOllama + OllamaEmbeddings read this env var to find the server.
+      OLLAMA_HOST: http://ollama:11434
+      # Langfuse credentials are optional; if unset, tracing is disabled.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+volumes:
+  ollama-data:
