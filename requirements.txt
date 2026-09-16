@@ -12,4 +12,4 @@ chromadb
 langchain-text-splitters
 langfuse
 python-dotenv
- 
+streamlit
