@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
- 
+
 from app.agent import config
 from app.agent.state import AgentState
 from app.agent.tracing import get_callbacks
@@ -16,12 +16,12 @@ from app.agent.nodes import (
     tool_execute_node,
     tool_answer_node,
 )
- 
- 
+
+
 def _route_after_intent(state: AgentState) -> str:
     return "tool_call" if state.get("intent") == "personal_data" else "retrieve"
- 
- 
+
+
 def _route_after_grading(state: AgentState) -> str:
     grade = state.get("grade", "weak")
     retries = state.get("retry_count", 0)
@@ -32,19 +32,19 @@ def _route_after_grading(state: AgentState) -> str:
     if retries < config.MAX_RETRIES:
         return "rewrite"
     return "escalate"
- 
- 
+
+
 def build_graph():
     """
     Compile and return the runnable LangGraph.
- 
+
     Compiled with an in-memory checkpointer so `interrupt()` works.
     When you call `graph.invoke(...)`, always pass a `config` with a
     unique `thread_id` - each conversation is a separate thread and
     the checkpointer keys state by thread.
     """
     workflow = StateGraph(AgentState)
- 
+
     # Register every node.
     workflow.add_node("classify_intent", classify_intent_node)
     workflow.add_node("retrieve", retrieve_node)
@@ -56,23 +56,23 @@ def build_graph():
     workflow.add_node("human_approval", human_approval_node)
     workflow.add_node("tool_execute", tool_execute_node)
     workflow.add_node("tool_answer", tool_answer_node)
- 
+
     # Entry.
     workflow.add_edge(START, "classify_intent")
- 
+
     # First branch: intent -> retrieve OR tool_call.
     workflow.add_conditional_edges(
         "classify_intent",
         _route_after_intent,
         {"retrieve": "retrieve", "tool_call": "tool_call"},
     )
- 
+
     # Tool pipeline (Stage 4).
     workflow.add_edge("tool_call", "human_approval")
     workflow.add_edge("human_approval", "tool_execute")
     workflow.add_edge("tool_execute", "tool_answer")
     workflow.add_edge("tool_answer", END)
- 
+
     # Policy path (unchanged from Stage 2).
     workflow.add_edge("retrieve", "grade")
     workflow.add_conditional_edges(
@@ -87,19 +87,19 @@ def build_graph():
     workflow.add_edge("rewrite", "retrieve")
     workflow.add_edge("generate", END)
     workflow.add_edge("escalate", END)
- 
+
     # Compile WITH a checkpointer so interrupt/resume works.
     return workflow.compile(checkpointer=MemorySaver())
- 
- 
+
+
 def _run_config(thread_id: str) -> dict:
     """Standard run config: thread + tracing callbacks if configured."""
     return {
         "configurable": {"thread_id": thread_id},
         "callbacks": get_callbacks(),
     }
- 
- 
+
+
 def run_agent(
     question: str,
     current_user: str = "EMP-001",
@@ -107,7 +107,7 @@ def run_agent(
 ) -> AgentState:
     """
     Run the agent to completion for a NON-interrupting question.
- 
+
     If the graph pauses on human_approval, use `run_agent_interactive`
     below instead - that handles the pause + resume dance.
     """
@@ -120,8 +120,8 @@ def run_agent(
         "path": [],
     }
     return graph.invoke(initial_state, config=_run_config(thread_id))
- 
- 
+
+
 def run_agent_interactive(
     question: str,
     approve_writes: bool = True,
@@ -131,18 +131,18 @@ def run_agent_interactive(
 ) -> AgentState:
     """
     Run the agent AND handle any human-approval pause automatically.
- 
+
     `approve_writes` is the decision the "human" (you, in tests) will
     supply if the agent pauses to ask. Real applications would surface
     the pause to a UI and wait for a user click.
- 
+
     Returns the final state after the graph runs to completion.
     """
     from langgraph.types import Command
- 
+
     graph = build_graph()
     cfg = _run_config(thread_id)
- 
+
     initial_state: AgentState = {
         "question": question,
         "query": question,
@@ -150,10 +150,10 @@ def run_agent_interactive(
         "retry_count": 0,
         "path": [],
     }
- 
+
     # First run - may hit an interrupt and pause.
     result = graph.invoke(initial_state, config=cfg)
- 
+
     # After invoke, check if the graph is paused waiting on approval.
     snapshot = graph.get_state(cfg)
     if snapshot.interrupts:
@@ -162,6 +162,68 @@ def run_agent_interactive(
             Command(resume={"approval": decision, "note": approval_note}),
             config=cfg,
         )
- 
+
     return result
- 
+
+
+# --------------------------------------------------------------------------
+# UI-friendly helpers: start a run, pause on interrupt, resume explicitly.
+# Used by the Streamlit frontend where a human clicks Approve/Reject.
+# --------------------------------------------------------------------------
+
+def start_run(
+    question: str,
+    current_user: str = "EMP-001",
+    thread_id: str = "default",
+    graph=None,
+) -> tuple[AgentState, bool, list[dict]]:
+    """
+    Start a fresh run. Returns (state, paused, pending_writes).
+
+    - paused=False: run completed; state has the final answer.
+    - paused=True : graph is waiting for human approval on writes.
+                    Caller should show pending_writes and later
+                    invoke resume_run() with a decision.
+
+    `graph` is optional so the UI can share a single compiled graph
+    across many calls (the graph is expensive to build).
+    """
+    graph = graph or build_graph()
+    cfg = _run_config(thread_id)
+
+    initial_state: AgentState = {
+        "question": question,
+        "query": question,
+        "current_user": current_user,
+        "retry_count": 0,
+        "path": [],
+    }
+    state = graph.invoke(initial_state, config=cfg)
+
+    snapshot = graph.get_state(cfg)
+    if snapshot.interrupts:
+        pending = state.get("pending_writes", []) or []
+        return state, True, pending
+    return state, False, []
+
+
+def resume_run(
+    thread_id: str,
+    approval: str,           # "approved" | "rejected"
+    note: str = "",
+    graph=None,
+) -> AgentState:
+    """
+    Resume a previously-paused run with a human decision.
+
+    The thread_id MUST match the one used in start_run - that is how
+    the checkpointer finds the paused state.
+    """
+    from langgraph.types import Command
+
+    graph = graph or build_graph()
+    cfg = _run_config(thread_id)
+    return graph.invoke(
+        Command(resume={"approval": approval, "note": note}),
+        config=cfg,
+    )
