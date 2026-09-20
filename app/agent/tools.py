@@ -168,6 +168,10 @@ ALL_TOOLS = [get_leave_balance, get_leave_requests, get_attendance]
 TOOLS_BY_NAME = {t.name: t for t in ALL_TOOLS}
 
 
+# ==========================================================================
+# STAGE 4 - write tool (gated by human-in-the-loop approval in the graph)
+# ==========================================================================
+
 @tool
 def submit_leave_request(
     employee_code: str,
@@ -196,39 +200,34 @@ def submit_leave_request(
         Dict describing the created request, or an error.
     """
     from datetime import date as _date
-    from app.models import LeaveRequest
+    from app.services.leave import (
+        create_leave_request, LeaveServiceError,
+    )
 
     def _run(session):
-        emp = _get_employee(session, employee_code)
-        if emp is None:
-            return {"error": f"No employee with code '{employee_code}'."}
-
         try:
             start = _date.fromisoformat(start_date)
             end = _date.fromisoformat(end_date)
         except ValueError as e:
             return {"error": f"Invalid date format: {e}"}
 
-        if end < start:
-            return {"error": "end_date cannot be before start_date."}
-
-        request = LeaveRequest(
-            employee_id=emp.id,
-            leave_type=leave_type,
-            start_date=start,
-            end_date=end,
-            days=days,
-            reason=reason,
-            status="pending",
-        )
-        session.add(request)
-        session.commit()
-        session.refresh(request)
+        try:
+            request = create_leave_request(
+                session=session,
+                employee_code=employee_code,
+                leave_type=leave_type,
+                start_date=start,
+                end_date=end,
+                days=float(days),
+                reason=reason,
+            )
+        except LeaveServiceError as exc:
+            return {"error": str(exc)}
 
         return {
             "created": True,
             "request_id": request.id,
-            "employee_code": emp.employee_code,
+            "employee_code": employee_code,
             "leave_type": request.leave_type,
             "start_date": request.start_date.isoformat(),
             "end_date": request.end_date.isoformat(),

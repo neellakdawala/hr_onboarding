@@ -14,7 +14,7 @@ COPY app/ ./app/
 COPY data/ ./data/
 COPY evals/ ./evals/
 
-RUN python -m app.seed
+COPY smoke_test.py consistency_test.py ./
 
 EXPOSE 8000
 
