@@ -1,14 +1,3 @@
-"""
-FastAPI app for the minimal HRMS.
-
-These endpoints are the surface the LangGraph agent's tools will call in a
-later stage. For now they are a normal REST API you can browse yourself.
-
-Run the API:
-    uvicorn app.main:app --reload
-Then open:
-    http://127.0.0.1:8000/docs       (interactive API docs)
-"""
 from datetime import date, timedelta
 
 from fastapi import FastAPI, Depends, HTTPException
@@ -22,8 +11,7 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Minimal HRMS API",
-    description="Stage 1 foundation. A thin HR data layer for the "
-                "LangGraph onboarding agent to query in later stages.",
+    description="LangGraph onboarding agent ",
     version="0.1.0",
 )
 
@@ -96,29 +84,101 @@ def create_leave_request(
 ):
     """
     Submit a new leave request. It starts in 'pending' status.
-    This is the one write endpoint the agent's tools may use later
-    (e.g. to file a request on a new hire's behalf).
     """
-    emp = _get_employee_or_404(payload.employee_code, db)
-
-    if payload.end_date < payload.start_date:
-        raise HTTPException(
-            status_code=400, detail="end_date cannot be before start_date."
-        )
-
-    request = models.LeaveRequest(
-        employee_id=emp.id,
-        leave_type=payload.leave_type,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
-        days=payload.days,
-        reason=payload.reason,
-        status="pending",
+    from app.services.leave import (
+        create_leave_request as svc_create, LeaveServiceError,
     )
-    db.add(request)
-    db.commit()
-    db.refresh(request)
-    return request
+    try:
+        return svc_create(
+            session=db,
+            employee_code=payload.employee_code,
+            leave_type=payload.leave_type,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            days=payload.days,
+            reason=payload.reason,
+        )
+    except LeaveServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/leave-requests/{request_id}/approve",
+    response_model=schemas.LeaveRequestOut,
+)
+def approve_leave_request_endpoint(
+    request_id: int, db: Session = Depends(get_db)
+):
+    """
+    Approve a pending leave request.
+
+    Atomically transitions status to 'approved' AND adds the request's
+    days to the matching leave_balance.used_days. If either fails, both
+    roll back - the invariant is maintained.
+    """
+    from app.services.leave import (
+        approve_leave_request as svc_approve,
+        LeaveServiceError, InvalidTransition, RequestNotFound,
+    )
+    try:
+        return svc_approve(db, request_id)
+    except RequestNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except LeaveServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/leave-requests/{request_id}/reject",
+    response_model=schemas.LeaveRequestOut,
+)
+def reject_leave_request_endpoint(
+    request_id: int,
+    reason: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Reject a pending leave request. Balance is not touched.
+    """
+    from app.services.leave import (
+        reject_leave_request as svc_reject,
+        LeaveServiceError, InvalidTransition, RequestNotFound,
+    )
+    try:
+        return svc_reject(db, request_id, reason=reason)
+    except RequestNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except LeaveServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post(
+    "/leave-requests/{request_id}/cancel",
+    response_model=schemas.LeaveRequestOut,
+)
+def cancel_leave_request_endpoint(
+    request_id: int, db: Session = Depends(get_db)
+):
+    """
+    Cancel a request. If it was approved, its days are refunded to
+    the balance in the same transaction.
+    """
+    from app.services.leave import (
+        cancel_leave_request as svc_cancel,
+        LeaveServiceError, InvalidTransition, RequestNotFound,
+    )
+    try:
+        return svc_cancel(db, request_id)
+    except RequestNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except LeaveServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---- Attendance ---------------------------------------------------------

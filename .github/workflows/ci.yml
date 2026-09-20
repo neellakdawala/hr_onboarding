@@ -31,6 +31,9 @@ jobs:
       - name: Stage 1 - HRMS API endpoints
         run: python smoke_test.py
 
+      - name: Domain consistency (invariant on leave balances)
+        run: python consistency_test.py
+
       - name: Stage 2 - agent graph structure
         run: python structure_test_stage2.py
 

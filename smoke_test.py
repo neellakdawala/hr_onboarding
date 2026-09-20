@@ -1,12 +1,3 @@
-"""
-Stage 1 smoke test.
-
-Exercises every endpoint of the minimal HRMS using FastAPI's TestClient
-(runs the app in-process, no separate server needed). This is both a
-sanity check and the seed of a real test suite we will grow later for CI.
-
-Run:  python smoke_test.py
-"""
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -77,5 +68,42 @@ valid_status = all(rec["status"] in ("present", "late", "absent")
                     for rec in records)
 check("attendance returns records with valid status",
       r.status_code == 200 and valid_status)
+
+# --- State transition endpoints ---
+# Create -> get its id
+new_req = {
+    "employee_code": "EMP-008", "leave_type": "annual",
+    "start_date": "2026-10-05", "end_date": "2026-10-07",
+    "days": 3, "reason": "smoke transition test",
+}
+r = client.post("/leave-requests", json=new_req)
+req_id = r.json()["id"]
+check("create returned an id", isinstance(req_id, int))
+
+# Approve should shift the balance
+before = client.get("/employees/EMP-008/leave-balances").json()
+annual_before = next(b["remaining_days"] for b in before if b["leave_type"] == "annual")
+r = client.post(f"/leave-requests/{req_id}/approve")
+check("approve returns 200", r.status_code == 200 and r.json()["status"] == "approved")
+after = client.get("/employees/EMP-008/leave-balances").json()
+annual_after = next(b["remaining_days"] for b in after if b["leave_type"] == "annual")
+check(
+    f"balance dropped by 3 on approve ({annual_before} -> {annual_after})",
+    abs((annual_before - annual_after) - 3.0) < 1e-6,
+)
+
+# Approving twice is a conflict
+r = client.post(f"/leave-requests/{req_id}/approve")
+check("re-approve returns 409", r.status_code == 409)
+
+# Cancel refunds the balance
+r = client.post(f"/leave-requests/{req_id}/cancel")
+check("cancel returns 200", r.status_code == 200)
+refunded = client.get("/employees/EMP-008/leave-balances").json()
+annual_refund = next(b["remaining_days"] for b in refunded if b["leave_type"] == "annual")
+check(
+    f"cancel refunded 3 back ({annual_after} -> {annual_refund})",
+    abs(annual_refund - annual_before) < 1e-6,
+)
 
 print("\nAll Stage 1 checks passed. The HRMS foundation works.")
