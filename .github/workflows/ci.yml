@@ -45,3 +45,6 @@ jobs:
 
       - name: Stage 5 - eval framework + scaffolding
         run: python structure_test_stage5.py
+
+      - name: Feature 2 - manager approval workflow
+        run: python structure_test_feature2.py
