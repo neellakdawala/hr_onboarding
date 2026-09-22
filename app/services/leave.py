@@ -1,36 +1,36 @@
 from __future__ import annotations
-
+ 
 from datetime import date, datetime, timezone
 from typing import Optional
-
+ 
 from sqlalchemy.orm import Session
-
+ 
 from app.models import Employee, LeaveBalance, LeaveRequest
-
-
+ 
+ 
 # --------------------------------------------------------------------------
 # Custom exceptions - so callers can distinguish "bad request" from "500"
 # --------------------------------------------------------------------------
 class LeaveServiceError(Exception):
     """Base class for expected leave-service failures."""
-
-
+ 
+ 
 class EmployeeNotFound(LeaveServiceError):
     pass
-
-
+ 
+ 
 class RequestNotFound(LeaveServiceError):
     pass
-
-
+ 
+ 
 class InvalidTransition(LeaveServiceError):
     """Trying to transition a request from a state that doesn't allow it."""
-
-
+ 
+ 
 class BalanceNotFound(LeaveServiceError):
     """The employee has no balance row for the requested leave_type."""
-
-
+ 
+ 
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
@@ -39,8 +39,8 @@ def _get_employee_by_code(session: Session, code: str) -> Employee:
     if emp is None:
         raise EmployeeNotFound(f"No employee with code '{code}'.")
     return emp
-
-
+ 
+ 
 def _get_request(session: Session, request_id: int) -> LeaveRequest:
     req = session.query(LeaveRequest).filter(
         LeaveRequest.id == request_id
@@ -48,8 +48,8 @@ def _get_request(session: Session, request_id: int) -> LeaveRequest:
     if req is None:
         raise RequestNotFound(f"No leave request with id {request_id}.")
     return req
-
-
+ 
+ 
 def _get_balance(
     session: Session, employee_id: int, leave_type: str
 ) -> LeaveBalance:
@@ -62,8 +62,8 @@ def _get_balance(
             f"Employee {employee_id} has no '{leave_type}' balance row."
         )
     return bal
-
-
+ 
+ 
 # --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def create_leave_request(
 ) -> LeaveRequest:
     """
     Create a new leave request in status='pending'.
-
+ 
     Balance is NOT touched here - pending requests do not consume days.
     Days are only deducted when a request is approved.
     """
@@ -86,12 +86,12 @@ def create_leave_request(
         raise LeaveServiceError("end_date cannot be before start_date.")
     if days <= 0:
         raise LeaveServiceError("days must be positive.")
-
+ 
     emp = _get_employee_by_code(session, employee_code)
     # Confirm the balance row exists so we fail early rather than at
     # approval time.
     _get_balance(session, emp.id, leave_type)
-
+ 
     request = LeaveRequest(
         employee_id=emp.id,
         leave_type=leave_type,
@@ -105,15 +105,15 @@ def create_leave_request(
     session.commit()
     session.refresh(request)
     return request
-
-
+ 
+ 
 def approve_leave_request(
     session: Session, request_id: int
 ) -> LeaveRequest:
     """
     Transition a pending request to 'approved' and ADD its days to the
     matching balance.used_days - atomically.
-
+ 
     Raises InvalidTransition if the request is not currently pending.
     """
     req = _get_request(session, request_id)
@@ -121,16 +121,16 @@ def approve_leave_request(
         raise InvalidTransition(
             f"Cannot approve a request in status '{req.status}'."
         )
-
+ 
     balance = _get_balance(session, req.employee_id, req.leave_type)
     balance.used_days = float(balance.used_days) + float(req.days)
     req.status = "approved"
-
+ 
     session.commit()
     session.refresh(req)
     return req
-
-
+ 
+ 
 def reject_leave_request(
     session: Session, request_id: int, reason: Optional[str] = None
 ) -> LeaveRequest:
@@ -142,7 +142,7 @@ def reject_leave_request(
         raise InvalidTransition(
             f"Cannot reject a request in status '{req.status}'."
         )
-
+ 
     req.status = "rejected"
     if reason:
         # Preserve the rejection reason alongside the original.
@@ -150,14 +150,14 @@ def reject_leave_request(
     session.commit()
     session.refresh(req)
     return req
-
-
+ 
+ 
 def cancel_leave_request(
     session: Session, request_id: int
 ) -> LeaveRequest:
     """
     Cancel a request.
-
+ 
     - If the request was 'pending': just mark as cancelled, no balance change.
     - If the request was 'approved': mark cancelled AND subtract days from
       balance.used_days.
@@ -168,32 +168,74 @@ def cancel_leave_request(
         raise InvalidTransition(
             f"Cannot cancel a request in status '{req.status}'."
         )
-
+ 
     if req.status == "approved":
         balance = _get_balance(session, req.employee_id, req.leave_type)
         new_used = float(balance.used_days) - float(req.days)
         # Guard against pathological underflow.
         balance.used_days = max(0.0, new_used)
-
+ 
     req.status = "cancelled"
     session.commit()
     session.refresh(req)
     return req
-
-
+ 
+ 
 # --------------------------------------------------------------------------
 # Consistency check - the invariant the whole module exists to protect
 # --------------------------------------------------------------------------
+def is_manager_of(
+    session: Session, approver_code: str, employee_id: int
+) -> bool:
+    """
+    Role gate: does `approver_code` manage the employee with `employee_id`?
+ 
+    Look up the employee's `manager_code` and compare. Any mismatch (or
+    missing manager on either side) returns False. This is checked by
+    the approve/reject write tools before any state change.
+    """
+    if not approver_code:
+        return False
+    employee = session.query(Employee).filter(
+        Employee.id == employee_id
+    ).first()
+    if employee is None or not employee.manager_code:
+        return False
+    return employee.manager_code == approver_code
+ 
+ 
+def list_pending_for_manager(
+    session: Session, manager_code: str
+) -> list[LeaveRequest]:
+    """
+    All pending leave requests submitted by employees who report to
+    the given manager_code. Used by the read tool the manager calls
+    to see their approval queue.
+    """
+    if not manager_code:
+        return []
+    reports = session.query(Employee).filter(
+        Employee.manager_code == manager_code
+    ).all()
+    report_ids = [e.id for e in reports]
+    if not report_ids:
+        return []
+    return session.query(LeaveRequest).filter(
+        LeaveRequest.employee_id.in_(report_ids),
+        LeaveRequest.status == "pending",
+    ).all()
+ 
+ 
 def check_balance_consistency(session: Session) -> list[dict]:
     """
     Walk every (employee, leave_type) balance row and confirm that
     used_days == sum(approved requests' days).
-
+ 
     Returns a list of MISMATCH dicts (empty means all consistent).
     Used by the consistency test and by anyone auditing the DB.
     """
     mismatches: list[dict] = []
-
+ 
     for bal in session.query(LeaveBalance).all():
         approved_days_sum = sum(
             float(r.days) for r in session.query(LeaveRequest).filter(
