@@ -11,7 +11,8 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Minimal HRMS API",
-    description="LangGraph onboarding agent ",
+    description="Stage 1 foundation. A thin HR data layer for the "
+                "LangGraph onboarding agent to query in later stages.",
     version="0.1.0",
 )
 
@@ -198,3 +199,88 @@ def get_attendance(
     cutoff = date.today() - timedelta(days=days)
     recent = [r for r in emp.attendance_records if r.work_date >= cutoff]
     return sorted(recent, key=lambda r: r.work_date, reverse=True)
+
+
+# ==========================================================================
+# STAGE 6 - Feature 3: HR ticket endpoints
+# ==========================================================================
+from pydantic import BaseModel as _BaseModel
+from datetime import datetime as _dt
+
+
+class HRTicketCreate(_BaseModel):
+    employee_code: str
+    subject: str
+    description: str
+    category: str = "HR"
+    priority: str = "medium"
+
+
+class HRTicketOut(_BaseModel):
+    id: int
+    employee_id: int
+    subject: str
+    description: str
+    category: str
+    priority: str
+    status: str
+    assigned_team: str | None = None
+    created_at: _dt | None = None
+    resolved_at: _dt | None = None
+
+    class Config:
+        from_attributes = True
+
+
+@app.post("/hr-tickets", response_model=HRTicketOut)
+def create_hr_ticket_endpoint(
+    payload: HRTicketCreate, db: Session = Depends(get_db)
+):
+    from app.services.tickets import (
+        create_ticket as svc_create, TicketServiceError,
+    )
+    try:
+        return svc_create(
+            session=db,
+            employee_code=payload.employee_code,
+            subject=payload.subject,
+            description=payload.description,
+            category=payload.category,
+            priority=payload.priority,
+        )
+    except TicketServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get(
+    "/employees/{employee_code}/hr-tickets",
+    response_model=list[HRTicketOut],
+)
+def list_employee_tickets(
+    employee_code: str, db: Session = Depends(get_db)
+):
+    from app.services.tickets import (
+        list_tickets_for_employee, TicketServiceError,
+    )
+    try:
+        return list_tickets_for_employee(db, employee_code)
+    except TicketServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/hr-tickets/{ticket_id}/resolve", response_model=HRTicketOut)
+def resolve_ticket_endpoint(
+    ticket_id: int, db: Session = Depends(get_db)
+):
+    from app.services.tickets import (
+        resolve_ticket as svc_resolve,
+        TicketServiceError, TicketNotFound, InvalidTicketTransition,
+    )
+    try:
+        return svc_resolve(db, ticket_id)
+    except TicketNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidTicketTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except TicketServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

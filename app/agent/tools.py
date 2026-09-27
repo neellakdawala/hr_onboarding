@@ -68,7 +68,7 @@ def get_leave_balance(employee_code: str, leave_type: str | None = None) -> dict
                     "used_days": b.used_days,
                     "remaining_days": b.remaining_days,
                 }
-                for b in balances   
+                for b in balances
             ],
         }
  
@@ -432,5 +432,127 @@ WRITE_TOOL_NAMES = {
     "submit_leave_request",
     "approve_leave_request",
     "reject_leave_request",
+}
+ 
+ 
+# ==========================================================================
+# STAGE 6 - Feature 3: HR ticket creation and lookup
+# ==========================================================================
+ 
+@tool
+def create_hr_ticket(
+    employee_code: str,
+    subject: str,           
+    description: str,
+    category: str = "HR",
+    priority: str = "medium",
+) -> dict:
+    """
+    File a new HR support ticket. WRITE action - requires human approval.
+ 
+    Use this when the user's question cannot be resolved from policy
+    documents or existing HRMS tools, and they want it tracked as a
+    formal ticket. Also used automatically by the escalate node.
+ 
+    Args:
+        employee_code: The requesting employee's code, e.g. "EMP-001".
+        subject: Short one-line summary of the issue.
+        description: Full detail of the question or problem.
+        category: One of "HR", "IT", "Security", "Finance", "Other".
+        priority: One of "low", "medium", "high" (default "medium").
+ 
+    Returns:
+        Dict describing the created ticket, or an error.
+    """
+    from app.services.tickets import (
+        create_ticket, TicketServiceError,
+    )
+ 
+    def _run(session):
+        try:
+            t = create_ticket(
+                session=session,
+                employee_code=employee_code,
+                subject=subject,
+                description=description,
+                category=category,
+                priority=priority,
+            )
+        except TicketServiceError as exc:
+            return {"error": str(exc)}
+        return {
+            "created": True,
+            "ticket_id": t.id,
+            "employee_code": employee_code,
+            "subject": t.subject,
+            "category": t.category,
+            "priority": t.priority,
+            "assigned_team": t.assigned_team,
+            "status": t.status,
+        }
+ 
+    return _with_session(_run)
+ 
+ 
+@tool
+def list_my_tickets(employee_code: str) -> dict:
+    """
+    List the HR support tickets filed by this employee, newest first.
+ 
+    Args:
+        employee_code: The employee's code.
+ 
+    Returns:
+        Dict with the list of tickets and their current status.
+    """
+    from app.services.tickets import (
+        list_tickets_for_employee, TicketServiceError,
+    )
+ 
+    def _run(session):
+        try:
+            tickets = list_tickets_for_employee(session, employee_code)
+        except TicketServiceError as exc:
+            return {"error": str(exc)}
+        return {
+            "employee_code": employee_code,
+            "ticket_count": len(tickets),
+            "tickets": [
+                {
+                    "ticket_id": t.id,
+                    "subject": t.subject,
+                    "category": t.category,
+                    "priority": t.priority,
+                    "status": t.status,
+                    "assigned_team": t.assigned_team,
+                    "created_at": t.created_at.isoformat()
+                                   if t.created_at else None,
+                }
+                for t in tickets
+            ],
+        }
+ 
+    return _with_session(_run)
+ 
+ 
+# Refresh registries with the new tools.
+ALL_TOOLS = [
+    get_leave_balance,
+    get_leave_requests,
+    get_attendance,
+    list_pending_approvals,
+    list_my_tickets,
+    submit_leave_request,
+    approve_leave_request,
+    reject_leave_request,
+    create_hr_ticket,
+]
+TOOLS_BY_NAME = {t.name: t for t in ALL_TOOLS}
+ 
+WRITE_TOOL_NAMES = {
+    "submit_leave_request",
+    "approve_leave_request",
+    "reject_leave_request",
+    "create_hr_ticket",
 }
  

@@ -48,3 +48,6 @@ jobs:
 
       - name: Feature 2 - manager approval workflow
         run: python structure_test_feature2.py
+
+      - name: Feature 3 - HR ticket creation
+        run: python structure_test_feature3.py
