@@ -311,15 +311,24 @@ def classify_intent_node(state: AgentState) -> dict:
 
         Decide which of TWO categories the user's question falls into:
 
-          - "policy": general questions about company rules, benefits,
-            processes, IT setup, or security. Answered from company
-            policy documents. The question is about how things WORK
-            at the company in general.
+          - "policy": general questions about company RULES, benefits,
+            processes, IT setup guides, or security requirements.
+            Answered from company policy documents. The question is
+            about how things WORK at the company in general, and does
+            not ask you to look up data or perform any action.
 
-          - "personal_data": questions about THIS user's own records:
-            their leave balance, their attendance, the status of their
-            leave requests, and so on. The answer depends on live data
-            about a specific employee.
+          - "personal_data": questions that require looking up specific
+            live data OR performing an action. This includes:
+              * the user's own records (leave balance, attendance,
+                request status, tickets)
+              * MANAGER actions (list pending approvals for their team,
+                approve or reject a specific request by id)
+              * WRITE requests (submit a leave request, open/file/log
+                an HR or IT support ticket, request help)
+              * asking about the status of an existing ticket or request
+            Anything that says "open a ticket", "file a ticket",
+            "log this", "help me with X", "I need help with X" is
+            personal_data - it triggers a write action.
 
         Reply with JSON:
         {"intent": "policy" | "personal_data", "reason": "<short>"}
@@ -338,11 +347,29 @@ def classify_intent_node(state: AgentState) -> dict:
         Q: "Was I late this week?"
         -> {"intent": "personal_data", "reason": "asks about own attendance"}
 
-        Q: "Did my leave request get approved?"
-        -> {"intent": "personal_data", "reason": "own request status"}
+        Q: "Please open an IT ticket - my VPN keeps disconnecting."
+        -> {"intent": "personal_data", "reason": "wants to file a ticket"}
+
+        Q: "I need help - my laptop won't start."
+        -> {"intent": "personal_data", "reason": "wants IT support ticket"}
+
+        Q: "Log a ticket for HR about my direct-deposit form."
+        -> {"intent": "personal_data", "reason": "wants to file a ticket"}
 
         Q: "What is the sick leave policy?"
         -> {"intent": "policy", "reason": "general policy"}
+
+        Q: "What tickets have I filed?"
+        -> {"intent": "personal_data", "reason": "asks about own tickets"}
+
+        Q: "What leave requests need my approval?"
+        -> {"intent": "personal_data", "reason": "manager checks approval queue"}
+
+        Q: "Approve request 12."
+        -> {"intent": "personal_data", "reason": "manager approval action"}
+
+        Q: "Please submit an annual leave request for next Friday."
+        -> {"intent": "personal_data", "reason": "wants to submit a request"}
     """)
 
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
@@ -381,7 +408,8 @@ def tool_call_node(state: AgentState) -> dict:
 
     system = dedent(f"""\
         You are an HR assistant with access to tools that read live
-        employee data and (with approval) modify leave requests.
+        employee data and (with approval) modify leave requests and
+        file HR tickets.
 
         The current user's employee_code is "{user_code}". Always pass
         that employee_code as the argument to tools that need one.
@@ -400,6 +428,12 @@ def tool_call_node(state: AgentState) -> dict:
             Pass their employee_code as the approver_code. If they are
             not the manager of that request, the tool will refuse -
             that is expected; just relay the refusal to the user.
+          - Use create_hr_ticket when the user wants to FILE a support
+            ticket (e.g. "please open a ticket", "I need help with X",
+            "log this for HR"). Pick the right category from
+            HR / IT / Security / Finance / Other.
+          - Use list_my_tickets when the user asks about the status of
+            their existing tickets.
 
         Do not answer personal-data questions from memory - the tools
         are the only source of truth.
