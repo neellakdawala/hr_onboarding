@@ -394,7 +394,18 @@ def supervisor_node(state: AgentState) -> dict:
 
         Q: "Show me my open tickets."
         -> {{"specialist": "hr", "intent": "personal_data", "reason": "list own tickets"}}
-        {reroute_hint}
+
+        Q: "What tickets need my attention?"
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "manager ticket queue"}}
+
+        Q: "Show me open IT tickets."
+        -> {{"specialist": "it", "intent": "personal_data", "reason": "manager IT queue"}}
+
+        Q: "Resolve ticket 3 with note that the VPN was reset."
+        -> {{"specialist": "it", "intent": "personal_data", "reason": "manager resolves ticket"}}
+
+        Q: "Mark ticket 5 as in progress."
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "manager updates ticket"}}
         {reroute_hint}
     """)
 
@@ -480,6 +491,14 @@ def tool_call_node(state: AgentState) -> dict:
             ticket. Choose category="{config.SPECIALIST_TICKET_CATEGORY.get(specialist, "HR")}"
             for tickets you file as the {specialist} specialist.
           - Use list_my_tickets when the user asks about their tickets.
+          - Use list_open_tickets when a MANAGER asks what tickets need
+            their attention. Pass their employee_code as manager_code.
+          - Use update_ticket_status when a manager says to RESOLVE,
+            mark IN-PROGRESS, or reopen a specific ticket id. Pass
+            their employee_code as manager_code and pass a note if
+            they gave one. The tool refuses if the manager's department
+            does not cover the ticket's category - just relay that
+            refusal to the user.
 
         You may only call tools that are actually bound to you. Do not
         try to call tools you cannot see. Do not answer personal-data

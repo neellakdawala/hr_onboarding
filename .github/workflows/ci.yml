@@ -54,3 +54,6 @@ jobs:
 
       - name: Feature 4 - multi-agent supervisor
         run: python structure_test_feature4.py
+
+      - name: Feature 5 - manager ticket workflow
+        run: python structure_test_feature5.py

@@ -284,3 +284,45 @@ def resolve_ticket_endpoint(
         raise HTTPException(status_code=409, detail=str(exc))
     except TicketServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ==========================================================================
+# STAGE 6 - Feature 5: manager-facing ticket endpoints
+# ==========================================================================
+class TicketStatusUpdate(_BaseModel):
+    new_status: str
+    note: str | None = None
+
+
+@app.get(
+    "/managers/{manager_code}/open-tickets",
+    response_model=list[HRTicketOut],
+)
+def list_open_tickets_endpoint(
+    manager_code: str, db: Session = Depends(get_db)
+):
+    from app.services.tickets import list_open_tickets_for_manager
+    return list_open_tickets_for_manager(db, manager_code)
+
+
+@app.post(
+    "/hr-tickets/{ticket_id}/update-status",
+    response_model=HRTicketOut,
+)
+def update_ticket_status_endpoint(
+    ticket_id: int,
+    payload: TicketStatusUpdate,
+    db: Session = Depends(get_db),
+):
+    from app.services.tickets import (
+        update_ticket_status as svc_update,
+        TicketServiceError, InvalidTicketTransition, TicketNotFound,
+    )
+    try:
+        return svc_update(db, ticket_id, payload.new_status, note=payload.note)
+    except TicketNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except InvalidTicketTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except TicketServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
