@@ -45,12 +45,18 @@ SPECIALIST_TO_DEPARTMENT = {
 SPECIALIST_TO_TOOLS = {
     "hr": {
         "get_leave_balance", "get_leave_requests", "get_attendance",
-        "list_pending_approvals", "list_my_tickets",
+        "list_pending_approvals", "list_my_tickets", "list_open_tickets",
         "submit_leave_request", "approve_leave_request",
-        "reject_leave_request", "create_hr_ticket",
+        "reject_leave_request", "create_hr_ticket", "update_ticket_status",
     },
-    "it": {"list_my_tickets", "create_hr_ticket"},
-    "security": {"list_my_tickets", "create_hr_ticket"},
+    "it": {
+        "list_my_tickets", "list_open_tickets",
+        "create_hr_ticket", "update_ticket_status",
+    },
+    "security": {
+        "list_my_tickets", "list_open_tickets",
+        "create_hr_ticket", "update_ticket_status",
+    },
 }
 
 # The category to force onto a ticket when a specific specialist files one.
