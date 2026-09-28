@@ -35,11 +35,11 @@ print("Stage 3 structure test - agent + tools (no LLM required)\n")
 graph = build_graph()
 node_names = set(graph.get_graph().nodes.keys())
 expected = {
-    "classify_intent", "retrieve", "grade", "generate",
+    "supervisor", "retrieve", "grade", "generate",
     "rewrite", "escalate", "tool_call", "tool_answer",
 }
 check(
-    f"graph has all 8 nodes",
+    f"graph has core 8 nodes (supervisor + retrieval + tool flow)",
     expected.issubset(node_names),
 )
 
