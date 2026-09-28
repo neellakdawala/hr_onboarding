@@ -12,6 +12,11 @@ class AgentState(TypedDict, total=False):
     # ---- Intent (Stage 3) ----
     intent: str                       # "policy" | "personal_data"
 
+    # ---- Supervisor / specialist routing (Feature 4) ----
+    specialist: str                   # "hr" | "it" | "security"
+    supervisor_retries: int           # times we've been re-routed
+    supervisor_reason: str            # why the supervisor picked this specialist
+
     # ---- Retrieval (policy path) ----
     documents: list[Document]         # chunks returned by the last retrieval
 

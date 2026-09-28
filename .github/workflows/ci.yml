@@ -51,3 +51,6 @@ jobs:
 
       - name: Feature 3 - HR ticket creation
         run: python structure_test_feature3.py
+
+      - name: Feature 4 - multi-agent supervisor
+        run: python structure_test_feature4.py

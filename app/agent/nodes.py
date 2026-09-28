@@ -61,10 +61,37 @@ def retrieve_node(state: AgentState) -> dict:
     """
     Pure data-fetch node. Reads the CURRENT query (which may be the
     rewritten one) and pulls the top-k chunks from the vector store.
+
+    Feature 4: if a specialist has been chosen, we filter retrieval
+    by that specialist's department metadata. So the HR specialist
+    reads HR docs, the IT specialist reads IT docs, and the Security
+    specialist reads Security docs. On a first-pass empty result we
+    fall back to unfiltered search so a mildly mis-routed question
+    still finds something useful.
     """
-    retriever = get_retriever()
+    from app.agent.vector_store import build_vector_store
+
     query = state.get("query") or state["question"]
-    docs = retriever.invoke(query)
+    specialist = state.get("specialist")
+    dept = config.SPECIALIST_TO_DEPARTMENT.get(specialist) if specialist else None
+
+    store = build_vector_store()
+    if dept:
+        filtered = store.as_retriever(
+            search_kwargs={"k": config.RETRIEVAL_K,
+                           "filter": {"department": dept}}
+        )
+        docs = filtered.invoke(query)
+        # Fallback if the specialist's own corpus has nothing.
+        if not docs:
+            docs = store.as_retriever(
+                search_kwargs={"k": config.RETRIEVAL_K}
+            ).invoke(query)
+    else:
+        docs = store.as_retriever(
+            search_kwargs={"k": config.RETRIEVAL_K}
+        ).invoke(query)
+
     return {
         "documents": docs,
         "path": _append_path(state, "retrieve"),
@@ -90,6 +117,7 @@ def grade_documents_node(state: AgentState) -> dict:
     llm = get_json_llm()
     docs = state.get("documents", [])
     question = state["question"]
+    specialist = state.get("specialist", "hr")
 
     # If retrieval returned literally nothing, skip the LLM call.
     if not docs:
@@ -99,49 +127,48 @@ def grade_documents_node(state: AgentState) -> dict:
             "path": _append_path(state, "grade_documents"),
         }
 
-    system = dedent("""\
-        You are a document relevance grader for a company onboarding
-        assistant.
+    system = dedent(f"""\
+        You are a document relevance grader for the {specialist.upper()}
+        specialist of a company onboarding assistant.
 
-        Your ONLY job: decide whether the retrieved document chunks
-        contain enough information to answer the SPECIFIC question the
-        user asked.
+        Your job: decide whether the retrieved chunks contain enough
+        information to answer the SPECIFIC question the user asked,
+        AND whether the question is actually within the {specialist.upper()}
+        specialist's scope.
+
+        Scopes:
+          - hr:       leave, PTO, benefits, attendance, approvals
+          - it:       VPN, laptops, accounts, hardware, software
+          - security: passwords, 2FA, data handling, incidents
 
         Do NOT require the chunks to cover the entire topic area. If
-        the user asked one narrow question and the chunks answer that
-        one narrow question, the grade is "good" - even if the chunks
-        do not mention related things.
+        the user asked one narrow question and the chunks answer it,
+        the grade is "good".
 
-        Reply with a JSON object of the form:
-        {"grade": "good" | "weak" | "none", "reason": "<one short sentence>"}
+        Reply with JSON:
+        {{"grade": "good" | "weak" | "none" | "out_of_scope",
+          "reason": "<one short sentence>"}}
 
         Grade meanings:
-          - "good": the chunks directly answer the specific question asked.
-          - "weak": the chunks are on-topic but do NOT contain the answer.
-          - "none": the chunks are unrelated to the question.
+          - "good": chunks directly answer the specific question.
+          - "weak": chunks are on-topic but do not contain the answer.
+          - "none": chunks are unrelated to the question.
+          - "out_of_scope": question is real but belongs to a DIFFERENT
+            specialist (e.g. a password question routed to HR).
 
         Examples:
 
-        Q: "How many days of annual leave do I get?"
-        Chunks: "Every full-time employee receives 20 days of paid annual
-                 leave per calendar year."
-        -> {"grade": "good", "reason": "chunk states 20 days annual leave"}
+        Q: "How many days of annual leave do I get?"  [specialist=hr]
+        Chunks: "Every full-time employee receives 20 days..."
+        -> {{"grade": "good", "reason": "chunk states 20 days"}}
 
-        Q: "What are the password requirements?"
-        Chunks: "All accounts must use a password of at least 12 characters,
-                 containing uppercase and lowercase letters, at least one
-                 number and one special character."
-        -> {"grade": "good", "reason": "chunk lists the password rules"}
+        Q: "What are the password requirements?"  [specialist=hr]
+        Chunks: (HR chunks about leave and benefits)
+        -> {{"grade": "out_of_scope", "reason": "password is security scope"}}
 
-        Q: "Can I bring my dog to the office?"
-        Chunks: "Every full-time employee receives 20 days of paid annual
-                 leave per calendar year."
-        -> {"grade": "none", "reason": "chunks are about leave, not pets"}
-
-        Q: "What is the exact bonus percentage for engineers?"
-        Chunks: "The company offers competitive compensation and benefits
-                 to all employees."
-        -> {"grade": "weak", "reason": "on-topic but no specific number"}
+        Q: "Can I bring my dog to the office?"  [specialist=hr]
+        Chunks: (unrelated HR chunks)
+        -> {{"grade": "none", "reason": "not covered in HR docs"}}
     """)
 
     user = (
@@ -153,7 +180,7 @@ def grade_documents_node(state: AgentState) -> dict:
     parsed = _extract_json(response.content) or {}
 
     grade = str(parsed.get("grade", "")).lower().strip()
-    if grade not in {"good", "weak", "none"}:
+    if grade not in {"good", "weak", "none", "out_of_scope"}:
         # Defensive default: if the model returned junk, treat as weak
         # so we get one retry rather than blindly answering.
         grade = "weak"
@@ -287,104 +314,122 @@ def escalate_node(state: AgentState) -> dict:
 # STAGE 3 NODES - intent classification + tool calling for live HR data
 # ==========================================================================
 
-def classify_intent_node(state: AgentState) -> dict:
+def supervisor_node(state: AgentState) -> dict:
     """
-    First node in the graph (Stage 3+).
+    Multi-agent supervisor (Feature 4).
 
-    Decides whether the question is about company POLICY (goes through the
-    document retrieval flow) or about the user's own PERSONAL data (goes
-    through the tool-calling flow).
+    Two decisions in one LLM call:
+      1. Which specialist should handle this? (hr / it / security)
+      2. Is it a policy question or a personal_data / action?
 
-    Reply is JSON: {"intent": "policy" | "personal_data", "reason": "..."}
+    On a reroute (a specialist said "not my scope"), a hint is added
+    so the supervisor picks a different specialist rather than picking
+    the same one again.
 
-    Design choice worth defending: we classify up front instead of giving
-    the LLM tools + docs together and hoping it picks correctly. Small
-    local models are much more reliable at a two-way classification than
-    at "when should I call a tool". The trade-off is a small loss of
-    flexibility we could recover with a bigger model later.
+    Reply: {"specialist": ..., "intent": ..., "reason": "..."}
     """
     llm = get_json_llm()
     question = state["question"]
+    retries = state.get("supervisor_retries", 0)
+    last_specialist = state.get("specialist")
 
-    system = dedent("""\
-        You are an intent classifier for a company onboarding assistant.
+    reroute_hint = ""
+    if retries > 0 and last_specialist:
+        reroute_hint = (
+            f"\n\nIMPORTANT: The '{last_specialist}' specialist just said "
+            f"this is out of their scope. Pick a DIFFERENT specialist."
+        )
 
-        Decide which of TWO categories the user's question falls into:
+    system = dedent(f"""\
+        You are the supervisor for a multi-agent HR onboarding assistant.
 
-          - "policy": general questions about company RULES, benefits,
-            processes, IT setup guides, or security requirements.
-            Answered from company policy documents. The question is
-            about how things WORK at the company in general, and does
-            not ask you to look up data or perform any action.
+        Your job is to pick the right SPECIALIST and the right MODE for
+        each question. Three specialists are available:
 
-          - "personal_data": questions that require looking up specific
-            live data OR performing an action. This includes:
-              * the user's own records (leave balance, attendance,
-                request status, tickets)
-              * MANAGER actions (list pending approvals for their team,
-                approve or reject a specific request by id)
-              * WRITE requests (submit a leave request, open/file/log
-                an HR or IT support ticket, request help)
-              * asking about the status of an existing ticket or request
-            Anything that says "open a ticket", "file a ticket",
-            "log this", "help me with X", "I need help with X" is
-            personal_data - it triggers a write action.
+          - "hr": leave, PTO, benefits, onboarding, attendance,
+                  approvals, manager workflows, HR support tickets
+          - "it": VPN, laptops, accounts, hardware, software installs,
+                  passwords for accounts, IT support tickets
+          - "security": password policy, 2FA, data handling rules,
+                        security incidents, security tickets
+
+        Also decide the intent:
+          - "policy": general question, answer from documents
+          - "personal_data": look up live data OR perform an action
+            (submit leave, open ticket, approve request, etc.)
 
         Reply with JSON:
-        {"intent": "policy" | "personal_data", "reason": "<short>"}
+        {{"specialist": "hr" | "it" | "security",
+          "intent": "policy" | "personal_data",
+          "reason": "<one sentence>"}}
 
         Examples:
 
-        Q: "How many days of annual leave do I get per year?"
-        -> {"intent": "policy", "reason": "asks about the general entitlement"}
+        Q: "How many days of annual leave do I get?"
+        -> {{"specialist": "hr", "intent": "policy", "reason": "general PTO rule"}}
 
-        Q: "How many days of annual leave do I have LEFT?"
-        -> {"intent": "personal_data", "reason": "asks about own balance"}
+        Q: "How many days do I have left?"
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "own balance"}}
 
         Q: "What are the password requirements?"
-        -> {"intent": "policy", "reason": "general rule"}
+        -> {{"specialist": "security", "intent": "policy", "reason": "security rule"}}
 
-        Q: "Was I late this week?"
-        -> {"intent": "personal_data", "reason": "asks about own attendance"}
+        Q: "Please open an IT ticket - VPN keeps dropping."
+        -> {{"specialist": "it", "intent": "personal_data", "reason": "IT support ticket"}}
 
-        Q: "Please open an IT ticket - my VPN keeps disconnecting."
-        -> {"intent": "personal_data", "reason": "wants to file a ticket"}
+        Q: "How do I set up two-factor authentication?"
+        -> {{"specialist": "security", "intent": "policy", "reason": "2FA setup rule"}}
 
-        Q: "I need help - my laptop won't start."
-        -> {"intent": "personal_data", "reason": "wants IT support ticket"}
+        Q: "When will my laptop arrive?"
+        -> {{"specialist": "it", "intent": "policy", "reason": "IT onboarding"}}
 
-        Q: "Log a ticket for HR about my direct-deposit form."
-        -> {"intent": "personal_data", "reason": "wants to file a ticket"}
-
-        Q: "What is the sick leave policy?"
-        -> {"intent": "policy", "reason": "general policy"}
+        Q: "Approve leave request 12."
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "manager action"}}
 
         Q: "What tickets have I filed?"
-        -> {"intent": "personal_data", "reason": "asks about own tickets"}
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "asks about own tickets"}}
 
-        Q: "What leave requests need my approval?"
-        -> {"intent": "personal_data", "reason": "manager checks approval queue"}
+        Q: "What is the status of my IT ticket?"
+        -> {{"specialist": "it", "intent": "personal_data", "reason": "own ticket status"}}
 
-        Q: "Approve request 12."
-        -> {"intent": "personal_data", "reason": "manager approval action"}
-
-        Q: "Please submit an annual leave request for next Friday."
-        -> {"intent": "personal_data", "reason": "wants to submit a request"}
+        Q: "Show me my open tickets."
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "list own tickets"}}
+        {reroute_hint}
+        {reroute_hint}
     """)
 
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
     parsed = _extract_json(response.content) or {}
 
+    specialist = str(parsed.get("specialist", "")).lower().strip()
+    if specialist not in set(config.KNOWN_SPECIALISTS):
+        specialist = config.DEFAULT_SPECIALIST
+
+    # On reroute, force a change if the LLM ignored the hint.
+    if retries > 0 and last_specialist and specialist == last_specialist:
+        alternatives = [
+            s for s in config.KNOWN_SPECIALISTS if s != last_specialist
+        ]
+        specialist = alternatives[0]
+
     intent = str(parsed.get("intent", "")).lower().strip()
     if intent not in {"policy", "personal_data"}:
-        # Defensive default: unclear -> treat as policy so we still try
-        # to help from documents rather than firing an unnecessary tool.
         intent = "policy"
 
+    reason = str(parsed.get("reason", "")).strip() or "no reason given"
+
     return {
+        "specialist": specialist,
         "intent": intent,
-        "path": _append_path(state, "classify_intent"),
+        "supervisor_reason": reason,
+        "path": _append_path(state, f"supervisor[{specialist}]"),
     }
+
+
+# Alias for backward compat with earlier tests / graph wiring that
+# reference classify_intent_node. Any code importing the old name
+# gets the new supervisor behavior transparently.
+classify_intent_node = supervisor_node
 
 
 def tool_call_node(state: AgentState) -> dict:
@@ -402,14 +447,20 @@ def tool_call_node(state: AgentState) -> dict:
     """
     from app.agent.tools import ALL_TOOLS, WRITE_TOOL_NAMES
 
-    llm = get_llm().bind_tools(ALL_TOOLS)
+    specialist = state.get("specialist", config.DEFAULT_SPECIALIST)
+    allowed_names = config.SPECIALIST_TO_TOOLS.get(
+        specialist, set(t.name for t in ALL_TOOLS)
+    )
+    specialist_tools = [t for t in ALL_TOOLS if t.name in allowed_names]
+
+    llm = get_llm().bind_tools(specialist_tools)
     question = state["question"]
     user_code = state.get("current_user", "EMP-001")
 
     system = dedent(f"""\
-        You are an HR assistant with access to tools that read live
-        employee data and (with approval) modify leave requests and
-        file HR tickets.
+        You are the {specialist.upper()} specialist of a multi-agent HR
+        assistant. You have access to tools that read live data and
+        (with human approval) modify records.
 
         The current user's employee_code is "{user_code}". Always pass
         that employee_code as the argument to tools that need one.
@@ -417,37 +468,40 @@ def tool_call_node(state: AgentState) -> dict:
         Tool selection rules:
           - Use get_leave_balance / get_attendance / get_leave_requests
             when the user asks about their OWN data.
-          - Use submit_leave_request when the user clearly wants to
-            FILE a new leave request (not ask about existing ones).
-          - Use list_pending_approvals when the user is a MANAGER asking
-            what needs their approval, e.g. "what requests need my
-            approval?" or "any pending requests from my team?".
-            Pass their employee_code as the manager_code.
+          - Use submit_leave_request when they clearly want to FILE
+            a new leave request.
+          - Use list_pending_approvals when a manager asks about their
+            approval queue. Pass their employee_code as manager_code.
           - Use approve_leave_request / reject_leave_request when the
             user says to APPROVE or REJECT a specific request id.
-            Pass their employee_code as the approver_code. If they are
-            not the manager of that request, the tool will refuse -
-            that is expected; just relay the refusal to the user.
+            Pass their employee_code as approver_code. The tool will
+            refuse if they are not the direct manager.
           - Use create_hr_ticket when the user wants to FILE a support
-            ticket (e.g. "please open a ticket", "I need help with X",
-            "log this for HR"). Pick the right category from
-            HR / IT / Security / Finance / Other.
-          - Use list_my_tickets when the user asks about the status of
-            their existing tickets.
+            ticket. Choose category="{config.SPECIALIST_TICKET_CATEGORY.get(specialist, "HR")}"
+            for tickets you file as the {specialist} specialist.
+          - Use list_my_tickets when the user asks about their tickets.
 
-        Do not answer personal-data questions from memory - the tools
-        are the only source of truth.
+        You may only call tools that are actually bound to you. Do not
+        try to call tools you cannot see. Do not answer personal-data
+        questions from memory - the tools are the source of truth.
     """)
 
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
     raw_calls = getattr(response, "tool_calls", None) or []
 
-    # Fallback if the small model failed to emit a tool call.
+    # Fallback if the small model failed to emit a tool call. Choose a
+    # sensible default based on what the specialist can actually invoke.
     if not raw_calls:
-        raw_calls = [{
-            "name": "get_leave_balance",
-            "args": {"employee_code": user_code},
-        }]
+        if "get_leave_balance" in allowed_names:
+            raw_calls = [{
+                "name": "get_leave_balance",
+                "args": {"employee_code": user_code},
+            }]
+        else:
+            raw_calls = [{
+                "name": "list_my_tickets",
+                "args": {"employee_code": user_code},
+            }]
 
     # Normalise the shape and split reads/writes.
     tool_calls: list[dict] = []
