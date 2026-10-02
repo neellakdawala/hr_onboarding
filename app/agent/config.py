@@ -1,7 +1,8 @@
 from pathlib import Path
 
 # ---- LLM ----
-LLM_MODEL = "llama3.2:3b"      # user's choice; swap here to change everywhere
+# LLM_MODEL = "llama3.2:3b"      # user's choice; swap here to change everywhere
+LLM_MODEL = "qwen2.5:7b"      # user's choice; swap here to change everywhere
 LLM_TEMPERATURE = 0.0          # deterministic for grading + generation
 
 # ---- Embeddings ----

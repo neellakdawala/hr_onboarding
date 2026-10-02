@@ -7,7 +7,7 @@ Runs a mix of scenarios against the real LangGraph with Ollama:
   3. A write request that the "human" REJECTS   - request should NOT be created.
 
 Prereqs:
-    ollama pull llama3.2:3b
+    ollama pull qwen2.5:7b
     ollama pull nomic-embed-text
     python -m app.seed
     (optional) put LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY in .env

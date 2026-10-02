@@ -7,6 +7,7 @@ from app.database import SessionLocal
 from app.models import Employee
 from app.services.chats import (
     load_messages_for_user, append_message, clear_messages_for_user,
+    build_recent_history_snippet,
 )
 
 
@@ -246,41 +247,56 @@ if pending is not None:
             st.rerun()
 
 
-# ---- Chat input (disabled while an approval is pending OR processing) ---
-history = _current_history()
-is_processing = bool(history and history[-1].get("pending_run"))
-disabled = bool((pending is not None) or is_processing)
-
+# ---- Chat input (disabled while an approval is pending) -----------------
 user_input = st.chat_input(
-    "Ask a question…" if not disabled else "Please wait…",
-    key=f"chat_input_{'disabled' if disabled else 'enabled'}",
-    disabled=disabled,
+    "Ask a question…",
+    disabled=pending is not None,
 )
 
 # Phase 1: user just typed — persist immediately and rerun so their
 # message shows up before we start the slow agent call.
 if user_input and user_input.strip():
-    _persist_message(role="user", content=user_input)
+    _persist_message(role="user", content=user_input.strip())
+    # Mark the just-persisted entry so phase 2 knows to process it.
     _current_history()[-1]["pending_run"] = True
     st.rerun()
 
 # Phase 2: on the rerun, actually run the agent with a visible spinner
+history = _current_history()
 if (
     history
     and history[-1].get("pending_run")
     and st.session_state.get("pending") is None
 ):
     last = history[-1]
-    last["pending_run"] = False
+    last["pending_run"] = False   # consume the flag (in-memory only)
 
     with st.chat_message("assistant"):
         with st.spinner("Thinking…"):
             thread_id = _thread_id_for(st.session_state["employee_code"])
+
+            # Pull the last few turns BEFORE the current one, so the
+            # supervisor and tool_call nodes can resolve short follow-ups
+            # like "yes", "approve that", or "make it 4 days instead".
+            db_mem = SessionLocal()
+            try:
+                prior = load_messages_for_user(
+                    db_mem, st.session_state["employee_code"]
+                )[:-1][-6:]
+                recent_history = "\n".join(
+                    f"{('User' if m['role'] == 'user' else 'Assistant')}: "
+                    f"{(m['content'] or '').strip()[:300]}"
+                    for m in prior
+                )
+            finally:
+                db_mem.close()
+
             state, paused, pending_writes = start_run(
                 question=last["content"],
                 current_user=st.session_state["employee_code"],
                 thread_id=thread_id,
                 graph=get_graph(),
+                recent_history=recent_history,
             )
 
     if paused:

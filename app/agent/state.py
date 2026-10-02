@@ -17,6 +17,12 @@ class AgentState(TypedDict, total=False):
     supervisor_retries: int           # times we've been re-routed
     supervisor_reason: str            # why the supervisor picked this specialist
 
+    # ---- Conversation memory (Feature 7) ----
+    # Compact text summary of the last few turns, injected into the
+    # supervisor and tool_call prompts so follow-ups like "yes" or
+    # "approve that one" have context to resolve.
+    recent_history: str
+
     # ---- Retrieval (policy path) ----
     documents: list[Document]         # chunks returned by the last retrieval
 
