@@ -4,7 +4,7 @@ Stage 2 END-TO-END smoke test.
 Runs three real questions through the LangGraph agent using Ollama.
 This one requires Ollama to be running locally with the models pulled:
 
-    ollama pull llama3.2:3b
+    ollama pull qwen2.5:7b
     ollama pull nomic-embed-text
     ollama list      # should show both
 
