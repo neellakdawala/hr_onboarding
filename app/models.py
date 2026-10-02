@@ -100,3 +100,23 @@ class HRTicket(Base):
     assigned_team = Column(String)                             # HR/IT/Security/Finance
     created_at = Column(DateTime, default=_utcnow)
     resolved_at = Column(DateTime)
+
+
+class ChatMessage(Base):
+    """
+    Persistent chat history, one row per turn.
+
+    Keyed by employee_code (not employee_id) because the UI works with
+    codes directly. state_json holds the "How the agent got here"
+    details for assistant turns - only the fields the panel renders,
+    not the full LangGraph state (which contains non-serializable
+    LangChain Document objects). User turns leave state_json NULL.
+    """
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    employee_code = Column(String, index=True, nullable=False)
+    role = Column(String, nullable=False)             # "user" | "assistant"
+    content = Column(String, nullable=False)
+    state_json = Column(String)                        # JSON, nullable
+    created_at = Column(DateTime, default=_utcnow, index=True)
