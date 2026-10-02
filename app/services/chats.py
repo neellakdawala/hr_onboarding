@@ -96,3 +96,47 @@ def clear_messages_for_user(
     ).delete()
     session.commit()
     return count
+
+
+# --------------------------------------------------------------------------
+# Feature 7: conversation memory for the agent
+# --------------------------------------------------------------------------
+def build_recent_history_snippet(
+    session: Session,
+    employee_code: str,
+    max_turns: int = 6,
+    max_chars_per_turn: int = 300,
+) -> str:
+    """
+    Build a compact text summary of the last few turns, for the
+    supervisor and tool_call prompts.
+
+    Returns an empty string when there is no prior history. Each turn
+    is truncated to `max_chars_per_turn` so the context stays small
+    even if a previous answer was long.
+
+    Format:
+        [turn 1]
+        User: how many days do i have left?
+        Assistant: You have 15 days of annual leave remaining.
+        [turn 2]
+        User: submit a leave request from 2026-12-15 to 2026-12-20
+        Assistant: Your request has been submitted with id 11, pending.
+    """
+    rows = session.query(ChatMessage).filter(
+        ChatMessage.employee_code == employee_code
+    ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(
+        max_turns
+    ).all()
+    if not rows:
+        return ""
+    rows = list(reversed(rows))   # oldest first for prompt readability
+
+    lines: list[str] = []
+    for i, row in enumerate(rows, start=1):
+        content = (row.content or "").strip()
+        if len(content) > max_chars_per_turn:
+            content = content[:max_chars_per_turn].rstrip() + "…"
+        role = "User" if row.role == "user" else "Assistant"
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)

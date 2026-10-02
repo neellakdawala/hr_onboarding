@@ -129,6 +129,7 @@ def run_agent(
     question: str,
     current_user: str = "EMP-001",
     thread_id: str = "default",
+    recent_history: str = "",
 ) -> AgentState:
     graph = build_graph()
     initial_state: AgentState = {
@@ -137,6 +138,7 @@ def run_agent(
         "current_user": current_user,
         "retry_count": 0,
         "supervisor_retries": 0,
+        "recent_history": recent_history,
         "path": [],
     }
     return graph.invoke(initial_state, config=_run_config(thread_id))
@@ -148,6 +150,7 @@ def run_agent_interactive(
     current_user: str = "EMP-001",
     thread_id: str = "default",
     approval_note: str = "",
+    recent_history: str = "",
 ) -> AgentState:
     from langgraph.types import Command
 
@@ -160,6 +163,7 @@ def run_agent_interactive(
         "current_user": current_user,
         "retry_count": 0,
         "supervisor_retries": 0,
+        "recent_history": recent_history,
         "path": [],
     }
 
@@ -179,6 +183,7 @@ def start_run(
     current_user: str = "EMP-001",
     thread_id: str = "default",
     graph=None,
+    recent_history: str = "",
 ) -> tuple[AgentState, bool, list[dict]]:
     graph = graph or build_graph()
     cfg = _run_config(thread_id)
@@ -189,6 +194,7 @@ def start_run(
         "current_user": current_user,
         "retry_count": 0,
         "supervisor_retries": 0,
+        "recent_history": recent_history,
         "path": [],
     }
     state = graph.invoke(initial_state, config=cfg)

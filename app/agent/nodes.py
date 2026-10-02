@@ -25,7 +25,7 @@ def _extract_json(text: str) -> dict | None:
     """
     Best-effort JSON extraction.
 
-    Small local models (like llama3.2:3b) sometimes wrap JSON in
+    Small local models (like qwen2.5:7b) sometimes wrap JSON in
     markdown fences or add commentary. We try direct parse first,
     then fall back to grabbing the first {...} block.
     """
@@ -332,12 +332,23 @@ def supervisor_node(state: AgentState) -> dict:
     question = state["question"]
     retries = state.get("supervisor_retries", 0)
     last_specialist = state.get("specialist")
+    history = (state.get("recent_history") or "").strip()
 
     reroute_hint = ""
     if retries > 0 and last_specialist:
         reroute_hint = (
             f"\n\nIMPORTANT: The '{last_specialist}' specialist just said "
             f"this is out of their scope. Pick a DIFFERENT specialist."
+        )
+
+    history_block = ""
+    if history:
+        history_block = (
+            "\n\nRECENT CONVERSATION (oldest first) — use this to resolve "
+            "short follow-ups like 'yes', 'do it', 'approve that', 'try "
+            "again'. Classify the NEW question in the context of what "
+            "was just discussed:\n"
+            f"{history}"
         )
 
     system = dedent(f"""\
@@ -396,17 +407,26 @@ def supervisor_node(state: AgentState) -> dict:
         -> {{"specialist": "hr", "intent": "personal_data", "reason": "list own tickets"}}
 
         Q: "What tickets need my attention?"
-        -> {{"specialist": "hr", "intent": "personal_data", "reason": "manager ticket queue"}}
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "list open tickets"}}
 
         Q: "Show me open IT tickets."
-        -> {{"specialist": "it", "intent": "personal_data", "reason": "manager IT queue"}}
+        -> {{"specialist": "it", "intent": "personal_data", "reason": "list open tickets"}}
+        
+        Q: "List open tickets."
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "list open tickets"}}
+        
+        Q: "Are there any tickets I need to look at?"
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "list open tickets"}}
 
         Q: "Resolve ticket 3 with note that the VPN was reset."
         -> {{"specialist": "it", "intent": "personal_data", "reason": "manager resolves ticket"}}
 
         Q: "Mark ticket 5 as in progress."
         -> {{"specialist": "hr", "intent": "personal_data", "reason": "manager updates ticket"}}
-        {reroute_hint}
+        
+        Q: "What's in my ticket queue?"
+        -> {{"specialist": "hr", "intent": "personal_data", "reason": "list open tickets"}}
+        {reroute_hint}{history_block}
     """)
 
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
@@ -467,6 +487,7 @@ def tool_call_node(state: AgentState) -> dict:
     llm = get_llm().bind_tools(specialist_tools)
     question = state["question"]
     user_code = state.get("current_user", "EMP-001")
+    history = (state.get("recent_history") or "").strip()
 
     system = dedent(f"""\
         You are the {specialist.upper()} specialist of a multi-agent HR
@@ -504,6 +525,16 @@ def tool_call_node(state: AgentState) -> dict:
         try to call tools you cannot see. Do not answer personal-data
         questions from memory - the tools are the source of truth.
     """)
+
+    if history:
+        system += (
+            "\n\nRECENT CONVERSATION (oldest first) — use this when the "
+            "user's new message is a short follow-up like 'yes', 'do it', "
+            "'approve that', 'make it 4 days instead'. Fill in missing "
+            "arguments (dates, ids, leave_type) from this context when "
+            "the current message doesn't restate them:\n"
+            f"{history}"
+        )
 
     response = llm.invoke([SystemMessage(system), HumanMessage(question)])
     raw_calls = getattr(response, "tool_calls", None) or []
