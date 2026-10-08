@@ -11,6 +11,9 @@ Everything runs locally — no API keys, no cloud bills. One
 `docker compose up` and the whole stack is live.
 
 ---
+## Demo
+
+https://github.com/user-attachments/assets/87f1af7c-4283-48d2-8426-334254c030e0
 
 ## At a glance
 
